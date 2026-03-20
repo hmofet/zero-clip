@@ -1,0 +1,463 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>zero-clip</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, monospace;
+         background: #0a0a0a; color: #e0e0e0; min-height: 100vh; }
+  .container { max-width: 640px; margin: 0 auto; padding: 16px; }
+  header { display: flex; justify-content: space-between; align-items: center;
+           padding: 12px 0; border-bottom: 1px solid #222; margin-bottom: 16px; }
+  h1 { font-size: 1.2rem; font-weight: 600; }
+  .status { display: flex; align-items: center; gap: 6px; font-size: 0.85rem; color: #888; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; }
+  .dot.green { background: #3fb950; }
+  .dot.yellow { background: #d29922; }
+  .dot.red { background: #f85149; }
+  .dot.grey { background: #484f58; }
+
+  /* Landing page */
+  .landing { text-align: center; padding: 60px 0; }
+  .landing h2 { font-size: 1.4rem; margin-bottom: 8px; }
+  .landing p { color: #888; margin-bottom: 24px; line-height: 1.5; }
+  .url-box { background: #161616; border: 1px solid #333; border-radius: 8px;
+             padding: 14px; font-family: monospace; font-size: 0.9rem;
+             word-break: break-all; margin: 16px 0; text-align: left; color: #58a6ff; }
+
+  /* Buttons */
+  button { padding: 10px 20px; border: none; border-radius: 6px;
+           font-size: 0.9rem; cursor: pointer; font-weight: 600; }
+  .btn-primary { background: #238636; color: #fff; }
+  .btn-primary:hover { background: #2ea043; }
+  .btn-secondary { background: #21262d; color: #c9d1d9; border: 1px solid #30363d; }
+  .btn-secondary:hover { background: #30363d; }
+  .btn-row { display: flex; gap: 8px; margin: 12px 0; }
+
+  /* Clipboard area */
+  textarea { width: 100%; height: 150px; background: #111; border: 1px solid #333;
+             border-radius: 8px; padding: 12px; color: #e0e0e0; font-family: monospace;
+             font-size: 0.95rem; resize: vertical; }
+  textarea:focus { outline: none; border-color: #58a6ff; }
+
+  /* Received */
+  .received { margin-top: 20px; }
+  .received h3 { font-size: 0.9rem; color: #888; margin-bottom: 8px;
+                 border-top: 1px solid #222; padding-top: 16px; }
+  .received-item { background: #111; border: 1px solid #222; border-radius: 8px;
+                   padding: 12px; margin: 8px 0; cursor: pointer; font-family: monospace;
+                   font-size: 0.9rem; white-space: pre-wrap; word-break: break-all;
+                   max-height: 200px; overflow-y: auto; }
+  .received-item:hover { border-color: #58a6ff; }
+  .received-item .meta { font-size: 0.75rem; color: #555; margin-bottom: 6px; }
+  .toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+           background: #238636; color: #fff; padding: 8px 20px; border-radius: 6px;
+           font-size: 0.85rem; opacity: 0; transition: opacity 0.3s; pointer-events: none; }
+  .toast.show { opacity: 1; }
+
+  footer { margin-top: 24px; padding-top: 12px; border-top: 1px solid #222;
+           font-size: 0.75rem; color: #555; display: flex; justify-content: space-between; }
+  footer a { color: #58a6ff; text-decoration: none; }
+  .hidden { display: none; }
+</style>
+</head>
+<body>
+<div class="container">
+  <header>
+    <h1>zero-clip</h1>
+    <div class="status">
+      <div class="dot grey" id="statusDot"></div>
+      <span id="statusText">Disconnected</span>
+    </div>
+  </header>
+
+  <!-- Landing page (no fragment) -->
+  <div id="landing" class="landing">
+    <h2>Encrypted clipboard sharing</h2>
+    <p>Share clipboard content between devices.<br>
+       End-to-end encrypted. Zero knowledge by the server.</p>
+    <div class="url-box" id="generatedUrl"></div>
+    <div class="btn-row" style="justify-content:center">
+      <button class="btn-secondary" onclick="copyLink()">Copy link</button>
+      <button class="btn-primary" onclick="connectToRoom()">Connect</button>
+    </div>
+    <p style="margin-top:16px;font-size:0.8rem">
+      Open this link on another device to connect.
+    </p>
+  </div>
+
+  <!-- Connected view -->
+  <div id="app" class="hidden">
+    <textarea id="input" placeholder="Paste or type content here..."></textarea>
+    <div class="btn-row">
+      <button class="btn-primary" onclick="sendClipboard()">Send to peers</button>
+      <button class="btn-secondary" onclick="copyLink()">Copy link</button>
+    </div>
+    <div class="received" id="received">
+      <h3>Received</h3>
+    </div>
+  </div>
+
+  <footer>
+    <span>Connection: <span id="tierText">—</span></span>
+    <a href="javascript:void(0)" onclick="document.querySelector('textarea').value=document.documentElement.outerHTML;alert('Source copied to textarea')">View Source</a>
+  </footer>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+// ============================================================
+// zero-clip client — all logic in one file, fully auditable
+// ============================================================
+
+// --- State ---
+let roomId = '', passphrase = '', roomToken = '', aesKey = null;
+let peerId = crypto.randomUUID();
+let ws = null, peerConnections = new Map(), dataChannels = new Map();
+let useRelay = new Map(); // peer_id -> true if WebRTC failed
+const WS_URL = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws';
+
+const rtcConfig = {
+  iceServers: [
+    { urls: 'stun:stun.l.google.com:19302' },
+    { urls: 'stun:stun1.l.google.com:19302' },
+    { urls: 'stun:stun.cloudflare.com:3478' }
+  ]
+};
+
+// --- Crypto (Web Crypto API) ---
+
+async function deriveKey(roomId, passphrase) {
+  const enc = new TextEncoder();
+  const saltData = await crypto.subtle.digest('SHA-256', enc.encode('zero-clip:' + roomId));
+  const keyMaterial = await crypto.subtle.importKey(
+    'raw', enc.encode(passphrase), 'PBKDF2', false, ['deriveKey']
+  );
+  return crypto.subtle.deriveKey(
+    { name: 'PBKDF2', salt: new Uint8Array(saltData), iterations: 100000, hash: 'SHA-256' },
+    keyMaterial,
+    { name: 'AES-GCM', length: 256 },
+    false,
+    ['encrypt', 'decrypt']
+  );
+}
+
+async function computeRoomToken(roomId, passphrase) {
+  const enc = new TextEncoder();
+  const hash = await crypto.subtle.digest('SHA-256', enc.encode(roomId + ':' + passphrase));
+  return Array.from(new Uint8Array(hash)).map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+async function encrypt(plaintext) {
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const enc = new TextEncoder();
+  const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, aesKey, enc.encode(plaintext));
+  const combined = new Uint8Array(12 + ct.byteLength);
+  combined.set(iv);
+  combined.set(new Uint8Array(ct), 12);
+  return btoa(String.fromCharCode(...combined));
+}
+
+async function decrypt(b64) {
+  const raw = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+  const iv = raw.slice(0, 12);
+  const ct = raw.slice(12);
+  const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, aesKey, ct);
+  return new TextDecoder().decode(pt);
+}
+
+// --- URL Fragment ---
+
+function generateRoom() {
+  const words = ['alpha','bravo','cedar','delta','echo','frost','gamma','helix',
+    'ivory','jade','kite','lunar','maple','nova','ocean','pixel','quartz','ridge',
+    'solar','tango','ultra','vivid','wren','xenon','yacht','zephyr'];
+  const pick = () => words[Math.floor(Math.random() * words.length)];
+  const room = pick() + '-' + pick();
+  const pass = Array.from(crypto.getRandomValues(new Uint8Array(12)),
+    b => b.toString(36).padStart(2, '0')).join('').slice(0, 16);
+  return { room, pass };
+}
+
+function parseFragment() {
+  const frag = location.hash.slice(1);
+  if (!frag) return null;
+  const idx = frag.indexOf(':');
+  if (idx < 1) return null;
+  return { room: frag.slice(0, idx), pass: frag.slice(idx + 1) };
+}
+
+// --- WebSocket Signaling ---
+
+function connectWS() {
+  ws = new WebSocket(WS_URL);
+  ws.onopen = () => {
+    ws.send(JSON.stringify({ type: 'join', room_token: roomToken, peer_id: peerId }));
+    setStatus('yellow', 'Waiting for peers...');
+  };
+  ws.onmessage = (e) => {
+    const msg = JSON.parse(e.data);
+    switch (msg.type) {
+      case 'peer_joined': onPeerJoined(msg); break;
+      case 'peer_left': onPeerLeft(msg); break;
+      case 'signal': onSignal(msg); break;
+      case 'relay': onRelay(msg); break;
+      case 'error': showToast('Error: ' + msg.message); break;
+    }
+  };
+  ws.onclose = () => {
+    setStatus('red', 'Disconnected');
+    setTimeout(connectWS, 3000);
+  };
+}
+
+// --- WebRTC ---
+
+function createPeerConnection(remotePeerId, initiator) {
+  const pc = new RTCPeerConnection(rtcConfig);
+  peerConnections.set(remotePeerId, pc);
+
+  pc.onicecandidate = (e) => {
+    if (e.candidate) {
+      ws.send(JSON.stringify({
+        type: 'signal', to: remotePeerId,
+        payload: { type: 'candidate', candidate: e.candidate }
+      }));
+    }
+  };
+
+  if (initiator) {
+    const dc = pc.createDataChannel('clipboard');
+    setupDataChannel(dc, remotePeerId);
+    pc.createOffer().then(offer => {
+      pc.setLocalDescription(offer);
+      ws.send(JSON.stringify({
+        type: 'signal', to: remotePeerId, payload: { type: 'offer', sdp: offer.sdp }
+      }));
+    });
+
+    // Timeout: fall back to relay after 10s
+    setTimeout(() => {
+      if (!dataChannels.has(remotePeerId) || dataChannels.get(remotePeerId).readyState !== 'open') {
+        console.log('WebRTC timeout for', remotePeerId.slice(0,8), '— using relay');
+        useRelay.set(remotePeerId, true);
+        updateStatus();
+      }
+    }, 10000);
+  } else {
+    pc.ondatachannel = (e) => {
+      setupDataChannel(e.channel, remotePeerId);
+    };
+  }
+
+  return pc;
+}
+
+function setupDataChannel(dc, remotePeerId) {
+  dc.onopen = () => {
+    dataChannels.set(remotePeerId, dc);
+    useRelay.delete(remotePeerId);
+    updateStatus();
+    console.log('DataChannel open with', remotePeerId.slice(0,8));
+  };
+  dc.onclose = () => {
+    dataChannels.delete(remotePeerId);
+    updateStatus();
+  };
+  dc.onmessage = async (e) => {
+    try {
+      const plaintext = await decrypt(e.data);
+      addReceived(plaintext, remotePeerId);
+    } catch (err) { console.error('Decrypt error:', err); }
+  };
+}
+
+async function onPeerJoined(msg) {
+  // We are the newer peer if we don't already have a connection — initiate WebRTC
+  if (!peerConnections.has(msg.peer_id)) {
+    createPeerConnection(msg.peer_id, true);
+  }
+  updateStatus();
+}
+
+function onPeerLeft(msg) {
+  const pc = peerConnections.get(msg.peer_id);
+  if (pc) { pc.close(); peerConnections.delete(msg.peer_id); }
+  dataChannels.delete(msg.peer_id);
+  useRelay.delete(msg.peer_id);
+  updateStatus();
+}
+
+async function onSignal(msg) {
+  const { from, payload } = msg;
+  let pc = peerConnections.get(from);
+
+  if (payload.type === 'offer') {
+    if (pc) pc.close();
+    pc = createPeerConnection(from, false);
+    await pc.setRemoteDescription({ type: 'offer', sdp: payload.sdp });
+    const answer = await pc.createAnswer();
+    await pc.setLocalDescription(answer);
+    ws.send(JSON.stringify({
+      type: 'signal', to: from, payload: { type: 'answer', sdp: answer.sdp }
+    }));
+  } else if (payload.type === 'answer') {
+    if (pc) await pc.setRemoteDescription({ type: 'answer', sdp: payload.sdp });
+  } else if (payload.type === 'candidate') {
+    if (pc) await pc.addIceCandidate(payload.candidate);
+  }
+}
+
+async function onRelay(msg) {
+  try {
+    const plaintext = await decrypt(msg.payload);
+    addReceived(plaintext, msg.from);
+  } catch (err) { console.error('Relay decrypt error:', err); }
+}
+
+// --- Send ---
+
+async function sendClipboard() {
+  const text = document.getElementById('input').value;
+  if (!text) return;
+
+  const encrypted = await encrypt(text);
+
+  // Send via DataChannel (P2P) or relay (server)
+  for (const [pid] of peerConnections) {
+    const dc = dataChannels.get(pid);
+    if (dc && dc.readyState === 'open' && !useRelay.get(pid)) {
+      dc.send(encrypted);
+    } else {
+      // Tier 3 relay
+      ws.send(JSON.stringify({ type: 'relay', to: pid, payload: encrypted }));
+    }
+  }
+
+  showToast('Sent!');
+  document.getElementById('input').value = '';
+}
+
+// --- UI ---
+
+function setStatus(color, text) {
+  document.getElementById('statusDot').className = 'dot ' + color;
+  document.getElementById('statusText').textContent = text;
+}
+
+function updateStatus() {
+  const total = peerConnections.size;
+  if (total === 0) {
+    setStatus('yellow', 'Waiting for peers...');
+    document.getElementById('tierText').textContent = '—';
+    return;
+  }
+
+  let p2p = 0, relayed = 0;
+  for (const [pid] of peerConnections) {
+    const dc = dataChannels.get(pid);
+    if (dc && dc.readyState === 'open' && !useRelay.get(pid)) p2p++;
+    else relayed++;
+  }
+
+  const peerWord = total === 1 ? 'peer' : 'peers';
+  if (p2p > 0 && relayed === 0) {
+    setStatus('green', `${total} ${peerWord} connected`);
+    document.getElementById('tierText').textContent = 'P2P direct';
+  } else if (relayed > 0 && p2p === 0) {
+    setStatus('yellow', `${total} ${peerWord} (relayed)`);
+    document.getElementById('tierText').textContent = 'Relayed (encrypted)';
+  } else {
+    setStatus('green', `${total} ${peerWord} (mixed)`);
+    document.getElementById('tierText').textContent = 'Mixed P2P + relay';
+  }
+}
+
+function addReceived(text, fromPeer) {
+  const container = document.getElementById('received');
+  const item = document.createElement('div');
+  item.className = 'received-item';
+
+  const meta = document.createElement('div');
+  meta.className = 'meta';
+  meta.textContent = `From ${fromPeer.slice(0,8)}… • ${new Date().toLocaleTimeString()} • Click to copy`;
+
+  const content = document.createElement('div');
+  content.textContent = text;
+
+  item.appendChild(meta);
+  item.appendChild(content);
+  item.onclick = () => {
+    navigator.clipboard.writeText(text).then(() => showToast('Copied!'));
+  };
+
+  // Insert after the h3
+  const h3 = container.querySelector('h3');
+  if (h3.nextSibling) container.insertBefore(item, h3.nextSibling);
+  else container.appendChild(item);
+}
+
+function showToast(msg) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  setTimeout(() => t.classList.remove('show'), 1500);
+}
+
+function copyLink() {
+  const url = location.origin + '/#' + roomId + ':' + passphrase;
+  navigator.clipboard.writeText(url).then(() => showToast('Link copied!'));
+}
+
+// --- Init ---
+
+async function connectToRoom() {
+  if (!roomId) {
+    // Use generated values from landing page
+    const url = document.getElementById('generatedUrl').textContent;
+    const hashPart = url.split('#')[1];
+    const idx = hashPart.indexOf(':');
+    roomId = hashPart.slice(0, idx);
+    passphrase = hashPart.slice(idx + 1);
+    location.hash = roomId + ':' + passphrase;
+  }
+
+  aesKey = await deriveKey(roomId, passphrase);
+  roomToken = await computeRoomToken(roomId, passphrase);
+
+  document.getElementById('landing').classList.add('hidden');
+  document.getElementById('app').classList.remove('hidden');
+
+  connectWS();
+}
+
+async function init() {
+  const parsed = parseFragment();
+  if (parsed) {
+    roomId = parsed.room;
+    passphrase = parsed.pass;
+    await connectToRoom();
+  } else {
+    // Generate a new room
+    const { room, pass } = generateRoom();
+    roomId = room;
+    passphrase = pass;
+    const url = location.origin + '/#' + room + ':' + pass;
+    document.getElementById('generatedUrl').textContent = url;
+  }
+}
+
+// Auto-send on paste
+document.addEventListener('DOMContentLoaded', () => {
+  document.getElementById('input')?.addEventListener('paste', () => {
+    setTimeout(sendClipboard, 50);
+  });
+});
+
+init();
+</script>
+</body>
+</html>

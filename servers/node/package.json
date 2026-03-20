@@ -1,0 +1,12 @@
+{
+  "name": "zero-clip-server",
+  "version": "0.1.0",
+  "description": "zero-clip signaling server (Node.js)",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}
