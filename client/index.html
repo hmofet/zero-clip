@@ -120,7 +120,30 @@
 
 // --- State ---
 let roomId = '', passphrase = '', roomToken = '', aesKey = null;
-let peerId = crypto.randomUUID();
+function uuidv4() {
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  bytes[6] = (bytes[6] & 0x0f) | 0x40; // version 4
+  bytes[8] = (bytes[8] & 0x3f) | 0x80; // variant 1
+  const hex = Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('');
+  return `${hex.slice(0,8)}-${hex.slice(8,12)}-${hex.slice(12,16)}-${hex.slice(16,20)}-${hex.slice(20)}`;
+}
+
+function copyToClipboard(text) {
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    return navigator.clipboard.writeText(text);
+  }
+  const ta = document.createElement('textarea');
+  ta.value = text;
+  ta.style.position = 'fixed';
+  ta.style.left = '-9999px';
+  document.body.appendChild(ta);
+  ta.select();
+  document.execCommand('copy');
+  document.body.removeChild(ta);
+  return Promise.resolve();
+}
+
+let peerId = uuidv4();
 let ws = null, peerConnections = new Map(), dataChannels = new Map();
 let useRelay = new Map(); // peer_id -> true if WebRTC failed
 const WS_URL = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws';
@@ -396,7 +419,7 @@ function addReceived(text, fromPeer) {
   item.appendChild(meta);
   item.appendChild(content);
   item.onclick = () => {
-    navigator.clipboard.writeText(text).then(() => showToast('Copied!'));
+    copyToClipboard(text).then(() => showToast('Copied!'));
   };
 
   // Insert after the h3
@@ -414,7 +437,7 @@ function showToast(msg) {
 
 function copyLink() {
   const url = location.origin + '/#' + roomId + ':' + passphrase;
-  navigator.clipboard.writeText(url).then(() => showToast('Link copied!'));
+  copyToClipboard(url).then(() => showToast('Link copied!'));
 }
 
 // --- Init ---
